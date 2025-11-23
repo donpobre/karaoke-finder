@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8" />
+  <title>YouTube Voice Player v1.2</title>
+  <style>
+    body {
+      margin: 0;
+      background-color: #050505;
+      background-image:
+        radial-gradient(at 10% 20%, rgba(75, 0, 130, 0.4) 0px, transparent 50%),
+        radial-gradient(at 90% 80%, rgba(180, 0, 100, 0.4) 0px, transparent 50%);
+      background-attachment: fixed;
+      color: white;
+      font-family: sans-serif;
+      overflow: hidden;
+      height: 100vh;
+    }
+
+    #player {
+      width: 100%;
+      height: 100%;
+      min-height: 1000px;
+    }
+
+    #voice-btn {
+      position: absolute;
+      bottom: 30px;
+      right: 30px;
+      background: linear-gradient(90deg, #6a11cb 0%, #2575fc 100%);
+      color: white;
+      border: none;
+      padding: 12px 24px;
+      border-radius: 50px;
+      cursor: pointer;
+      font-weight: bold;
+      font-size: 16px;
+      z-index: 10;
+      opacity: 0.9;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+      transition: transform 0.2s, opacity 0.2s;
+    }
+
+    #voice-btn:hover {
+      opacity: 1;
+      transform: scale(1.05);
+    }
+
+    #voice-btn.listening {
+      background: linear-gradient(90deg, #00c6ff, #0072ff);
+      color: white;
+    }
+
+    #status {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      color: rgba(255, 255, 255, 0.7);
+      font-size: 18px;
+      font-family: 'Segoe UI', sans-serif;
+      pointer-events: none;
+      z-index: 10;
+      text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8);
+    }
+  </style>
+</head>
+
+<body>
+  <div id="player"></div>
+  <div id="status">Ready</div>
+  <button id="voice-btn" onclick="toggleVoice()">🎤 Enable Voice Control</button>
+
+  <script>
+    console.log("Player Component Version: 1.2");
+
+    function sendMessageToStreamlit(data) {
+      window.parent.postMessage({
+        isStreamlitMessage: true,
+        type: "streamlit:setComponentValue",
+        value: data,
+      }, "*");
+    }
+
+    function setFrameHeight(height) {
+      window.parent.postMessage({
+        isStreamlitMessage: true,
+        type: "streamlit:setFrameHeight",
+        height: height,
+      }, "*");
+    }
+
+    var tag = document.createElement('script');
+    tag.src = "https://www.youtube.com/iframe_api";
+    var firstScriptTag = document.getElementsByTagName('script')[0];
+    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+
+    var player;
+    var currentVideoId = "";
+
+    function onYouTubeIframeAPIReady() { }
+
+    window.addEventListener("message", function (event) {
+      if (event.data.type === "streamlit:render") {
+        const args = event.data.args;
+        const videoId = args.video_id;
+
+        if (!player) {
+          currentVideoId = videoId;
+          player = new YT.Player('player', {
+            height: '1000',
+            width: '100%',
+            videoId: videoId,
+            playerVars: { 'autoplay': 1, 'controls': 1, 'rel': 0, 'fs': 0 },
+            events: {
+              'onReady': onPlayerReady,
+              'onStateChange': onPlayerStateChange
+            }
+          });
+          setFrameHeight(600);
+        } else if (videoId !== currentVideoId) {
+          currentVideoId = videoId;
+          player.loadVideoById(videoId);
+        }
+      }
+    });
+
+    function onPlayerReady(event) {
+      document.getElementById('status').innerText = "Player Ready";
+      event.target.playVideo();
+    }
+
+    function onPlayerStateChange(event) {
+      if (event.data === YT.PlayerState.ENDED) {
+        document.getElementById('status').innerText = "Video Ended";
+        sendMessageToStreamlit({ type: "ended" });
+      }
+    }
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    let recognition;
+    let isListening = false;
+    let lastPlaybackCommandTime = 0;
+    let lastSearchCommandTime = 0;
+    let lastSearchQuery = "";
+    let searchExecutedThisSession = false;
+    const COMMAND_COOLDOWN = 2000;
+
+    if (SpeechRecognition) {
+      recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.lang = 'en-US';
+      recognition.interimResults = true;
+
+      recognition.onstart = function () {
+        console.log("=== VOICE RECOGNITION STARTED ===");
+        console.log("Resetting searchExecutedThisSession flag");
+        isListening = true;
+        searchExecutedThisSession = false;
+        const btn = document.getElementById('voice-btn');
+        btn.innerText = "🎤 Listening...";
+        btn.classList.add("listening");
+      };
+
+      recognition.onend = function () {
+        console.log("=== VOICE RECOGNITION ENDED ===");
+        if (isListening) {
+          recognition.start();
+        } else {
+          const btn = document.getElementById('voice-btn');
+          btn.innerText = "🎤 Enable Voice Control";
+          btn.classList.remove("listening");
+        }
+      };
+
+      recognition.onresult = function (event) {
+        let transcript = "";
+        for (let i = event.resultIndex; i < event.results.length; ++i) {
+          transcript += event.results[i][0].transcript;
+        }
+        transcript = transcript.trim().toLowerCase();
+
+        document.getElementById('status').innerText = "Heard: " + transcript;
+
+        if (window.statusTimeout) clearTimeout(window.statusTimeout);
+        window.statusTimeout = setTimeout(() => {
+          document.getElementById('status').innerText = "";
+        }, 3000);
+
+        const now = Date.now();
+
+        const checkCommand = (keywords, action, useCooldown = false) => {
+          if (keywords.some(k => transcript.includes(k))) {
+            if (useCooldown && (now - lastPlaybackCommandTime < COMMAND_COOLDOWN)) return;
+
+            console.log("Executing:", keywords[0]);
+            action();
+            if (useCooldown) lastPlaybackCommandTime = now;
+
+            const status = document.getElementById('status');
+            status.style.backgroundColor = "rgba(0, 255, 0, 0.8)";
+            setTimeout(() => status.style.backgroundColor = "rgba(0,0,0,0.5)", 500);
+          }
+        };
+
+        checkCommand(["pause", "stop"], () => { if (player) player.pauseVideo(); }, true);
+        checkCommand(["play", "resume", "start"], () => { if (player) player.playVideo(); }, true);
+        checkCommand(["next", "skip"], () => {
+          sendMessageToStreamlit({ type: "voice", command: "next" });
+        }, true);
+
+        if (event.results[event.results.length - 1].isFinal) {
+          if (transcript.includes("search")) {
+            console.log("\\n=== SEARCH COMMAND DETECTED ===");
+            console.log("Transcript:", transcript);
+            console.log("Session Flag BEFORE:", searchExecutedThisSession);
+
+            const parts = transcript.split("search");
+            if (parts.length > 1) {
+              let query = parts[1].trim();
+
+              const filterWords = ["enter", "ok", "okay", "go", "submit", "done"];
+              const queryWords = query.split(" ").filter(word =>
+                !filterWords.includes(word.toLowerCase())
+              );
+              query = queryWords.join(" ").trim();
+
+              console.log("Extracted Query:", query);
+              console.log("Last Query:", lastSearchQuery);
+              console.log("Time Since Last:", now - lastSearchCommandTime, "ms");
+              console.log("Cooldown:", COMMAND_COOLDOWN, "ms");
+
+              const flagBlocked = searchExecutedThisSession;
+              const queryBlocked = (query === lastSearchQuery);
+              const cooldownBlocked = (now - lastSearchCommandTime < COMMAND_COOLDOWN);
+
+              console.log("Blocked by Flag?", flagBlocked);
+              console.log("Blocked by Same Query?", queryBlocked);
+              console.log("Blocked by Cooldown?", cooldownBlocked);
+
+              const isDuplicate = flagBlocked || queryBlocked || cooldownBlocked;
+
+              if (query.length > 0 && !isDuplicate) {
+                console.log("✓✓✓ EXECUTING SEARCH FOR:", query);
+                sendMessageToStreamlit({ type: "voice", command: "search", query: query });
+                lastSearchCommandTime = now;
+                lastSearchQuery = query;
+                searchExecutedThisSession = true;
+                console.log("Session Flag AFTER:", searchExecutedThisSession);
+
+                setTimeout(() => {
+                  console.log("Clearing last search query");
+                  lastSearchQuery = "";
+                }, 10000);
+              } else {
+                console.log("✗✗✗ SEARCH BLOCKED");
+                console.log("Reason: Flag=" + flagBlocked + ", Query=" + queryBlocked + ", Cooldown=" + cooldownBlocked);
+              }
+            }
+            console.log("=== END SEARCH PROCESSING ===\\n");
+          }
+        }
+      };
+    } else {
+      document.getElementById('voice-btn').innerText = "Voice Not Supported";
+      document.getElementById('voice-btn').disabled = true;
+    }
+
+    function toggleVoice() {
+      if (!recognition) return;
+      if (isListening) {
+        isListening = false;
+        recognition.stop();
+      } else {
+        isListening = true;
+        recognition.start();
+      }
+    }
+
+    window.parent.postMessage({
+      isStreamlitMessage: true,
+      type: "streamlit:componentReady",
+      apiVersion: 1
+    }, "*");
+  </script>
+</body>
+
+</html>
